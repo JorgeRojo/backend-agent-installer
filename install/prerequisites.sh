@@ -34,7 +34,7 @@ check_prerequisites() {
     die "${KIRO_DIR} is a clone of backend-agent. Move it aside before installing the isolated layout."
   fi
 
-  command_exists redpoints || yellow "  ⚠ redpoints CLI not found — PRO/PRE psql and cache-ops need it."
+  command_exists redpoints || yellow "  ⚠ redpoints CLI not found — PRO/PRE psql and cache-ops need it: uv tool install --index-url \"$(pip config get global.index-url)\" redpoints-cli"
   # The db-* subagents use archirelik's db_* Postgres servers instead of starting their own.
   [[ -x "${KIRO_DIR}/bin/archirelik/postgres-mcp.sh" && -f "${KIRO_DIR}/bin/archirelik/.env" \
     && -f "${KIRO_DIR}/agents/sub-archirelik-db.json" ]] \

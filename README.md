@@ -24,7 +24,7 @@ a temp dir, runs upstream's own `install.py` there, and then deploys the result:
 ```
 
 Requires archirelik, `kiro-cli` (run once), `python3` ≥ 3.11, `git`, `uv`, and SSH access to Bitbucket. The PRO/PRE
-workflows also need the `redpoints` CLI, and the shared `kevint` skill needs the kevint CLI (without it the install
+workflows also need the `redpoints` CLI (`uv tool install --index-url "$(pip config get global.index-url)" redpoints-cli`), and the shared `kevint` skill needs the kevint CLI (without it the install
 warns and continues). The `localdb` skill needs `psycopg2` in your `python3`.
 
 Re-running is safe. Values already in the `.env` are kept, and only empty or placeholder values are

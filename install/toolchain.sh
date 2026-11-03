@@ -163,7 +163,8 @@ check_dev_tools() {
     [git]="branches, commits, PRs" [python3]="skill scripts" [uv]="MCP servers"
     [rtk]="command output filter" [kiro-cli]="the agents" [curl]="REST skills"
     [docker]="kevint services for ITs" [kevint]="local Postgres, Redis, Neo4j"
-    [npx]="codegraph MCP server" [redpoints]="PRO/PRE psql, cache-ops" [aws]="logs-metrics, LocalStack"
+    [npx]="codegraph MCP server" [aws]="logs-metrics, LocalStack"
+    [redpoints]="PRO/PRE psql, cache-ops. Install: uv tool install --index-url \"\$(pip config get global.index-url)\" redpoints-cli"
     [psql]="psql skill"
   )
   local cmd
