@@ -35,7 +35,37 @@ check_prerequisites() {
   fi
 
   command_exists redpoints || yellow "  ⚠ redpoints CLI not found — PRO/PRE psql and cache-ops need it."
+  # The db-* subagents use archirelik's db_* Postgres servers instead of starting their own.
+  [[ -x "${KIRO_DIR}/bin/archirelik/postgres-mcp.sh" && -f "${KIRO_DIR}/bin/archirelik/.env" \
+    && -f "${KIRO_DIR}/agents/sub-archirelik-db.json" ]] \
+    || die "archirelik is not installed: install it first (its installer, ~/projects/archirelik/install.sh)."
+  ensure_rtk
   green "✓ Prerequisites satisfied"
+}
+
+# rtk trims the output of git, mvn, docker and ~100 other commands before the agent reads it.
+# Purely an optimization, so every failure path here warns and continues.
+ensure_rtk() {
+  if ! command_exists rtk; then
+    yellow "  rtk is not installed."
+    dim "    It filters verbose command output before it reaches the model."
+    if [[ -t 0 ]] && confirm "  Install rtk now (curl -fsSL raw.githubusercontent.com/rtk-ai/rtk/.../install.sh | sh)?"; then
+      curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh \
+        || { yellow "  ⚠ rtk installation failed — continuing without it."; return 0; }
+      export PATH="${HOME}/.local/bin:${PATH}"
+    else
+      yellow "  ⚠ skipped — the agent will read full command output."
+      return 0
+    fi
+  fi
+  command_exists rtk || { yellow "  ⚠ rtk is not on PATH — open a new shell and re-run."; return 0; }
+  local found
+  found="$(extract_version "$(rtk --version 2>&1)")"
+  if [[ -n "$found" ]] && ! version_ge "$found" "$MIN_RTK_VERSION"; then
+    yellow "  ⚠ rtk ${found} < ${MIN_RTK_VERSION} — not validated with this agent. Upgrade it."
+  else
+    green "  ✓ rtk ${found:-?} (>= ${MIN_RTK_VERSION})"
+  fi
 }
 
 # require_version <label> <minimum> <version output>

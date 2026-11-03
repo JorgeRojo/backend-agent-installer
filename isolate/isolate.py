@@ -62,6 +62,23 @@ PG_URI_RE = re.compile(
     r"^postgresql://\$\{LOCAL_PG_USER\}:\$\{LOCAL_PG_PASSWORD\}@\$\{LOCAL_PG_URL\}/([A-Za-z0-9_]+)$"
 )
 NEO4J_VAR_RE = re.compile(r"^\$\{NEO4J_([A-Z]+)_(URI|PASSWORD)\}$")
+# The local Postgres servers are archirelik's: same database, user and postgres-mcp, and every
+# extra server is one more connection out of max_connections=100 in every Claude session.
+ARCHIRELIK_DB_AGENT = KIRO / "agents" / "sub-archirelik-db.json"
+ARCHIRELIK_PG_WRAPPER = KIRO / "bin" / "archirelik" / "postgres-mcp.sh"
+# codegraph is archirelik's server too (same pinned npx package as agent-developer's): an own copy
+# would be one more Node process in every Claude session. Granted to the agents that read code.
+ARCHIRELIK_AGENT = KIRO / "agents" / "archirelik.json"
+ARCHIRELIK_ENSURE_CODEGRAPH = KIRO / "bin" / "archirelik" / "ensure-codegraph.sh"
+CODEGRAPH_AGENTS = (*ORCHESTRATORS, "code-reviewer", "code-reviewer-critical")
+# Installer-owned rules, deployed next to upstream's steering. The orchestrators load the whole
+# directory; a subagent gets a rule only through an explicit resource.
+OVERLAY_RULES = PROJECT_DIR / "overlay" / "agent-rules" / AGENT
+RULE_FOR_SUBAGENTS = {
+    "codegraph.md": ("code-reviewer", "code-reviewer-critical"),
+    "shell-rtk.md": ("atlassian", "build-verifier", "cache-ops", "code-reviewer",
+                     "code-reviewer-critical", "logs-metrics"),
+}
 
 PROMPT_NOTE = """
 
@@ -200,7 +217,48 @@ def inject_env_loader(text: str, env_keys: set[str]) -> str:
 
 # ---------- agents ----------
 
-def isolate_servers(agent: dict) -> None:
+def archirelik_db_servers() -> dict[str, tuple[str, dict]]:
+    """database -> (server name, config) of the archirelik db_* servers."""
+    if not (ARCHIRELIK_DB_AGENT.is_file() and os.access(ARCHIRELIK_PG_WRAPPER, os.X_OK)):
+        raise IsolationError("archirelik is not installed: its Postgres MCP servers are reused. "
+                             "Run the archirelik installer first.")
+    out = {}
+    for name, conf in (json.loads(ARCHIRELIK_DB_AGENT.read_text(encoding="utf-8")).get("mcpServers") or {}).items():
+        if conf.get("command") == str(ARCHIRELIK_PG_WRAPPER) and conf.get("args"):
+            out[conf["args"][0]] = (name, conf)
+    return out
+
+
+def rename_mcp_refs(agent: dict, renames: dict[str, list[str]]) -> None:
+    """Point `@server[/tool]` grants and `server/tool` permission matches at the new names.
+    A glob on the server part (`*-db/execute_sql`) becomes one entry per renamed server it covered."""
+    def expand(ref: str) -> list[str]:
+        server, sep, tool = ref.partition("/")
+        hits = [o for o in renames if fnmatch.fnmatchcase(o, server)]
+        if not hits:
+            return [ref]
+        return list(dict.fromkeys(n + sep + tool for o in hits for n in renames[o]))
+
+    for field in ("tools", "allowedTools"):
+        if isinstance(agent.get(field), list):
+            agent[field] = list(dict.fromkeys(
+                r for t in agent[field]
+                for r in (["@" + e for e in expand(t[1:])] if t.startswith("@") and t != "@builtin" else [t])
+            ))
+    for rule in (agent.get("permissions") or {}).get("rules") or []:
+        if rule.get("capability") == "mcp" and rule.get("match"):
+            rule["match"] = list(dict.fromkeys(e for m in rule["match"] for e in expand(m)))
+    if isinstance(agent.get("toolAliases"), dict):
+        agent["toolAliases"] = {
+            new: alias for key, alias in agent["toolAliases"].items()
+            for new in (["@" + e for e in expand(key[1:])] if key.startswith("@") else [key])
+        }
+
+
+def isolate_servers(agent: dict, pg: dict[str, tuple[str, dict]]) -> dict[str, str]:
+    """Rewrite the agent's servers in place. Returns {upstream postgres server -> archirelik name}."""
+    renamed: dict[str, str] = {}
+    servers: dict[str, dict] = {}
     for name, server in (agent.get("mcpServers") or {}).items():
         args = list(server.get("args") or [])
         env = dict(server.get("env") or {})
@@ -209,8 +267,14 @@ def isolate_servers(agent: dict) -> None:
             m = PG_URI_RE.match(env.pop("DATABASE_URI", ""))
             if not m:
                 raise IsolationError(f"{agent['name']}/{name}: unexpected DATABASE_URI shape")
-            server["command"] = str(BIN / "postgres-mcp.sh")
-            server["args"] = [m.group(1), *args]
+            if m.group(1) not in pg:
+                raise IsolationError(f"{agent['name']}/{name}: archirelik has no server for {m.group(1)}")
+            new, conf = pg[m.group(1)]
+            if new in servers:
+                raise IsolationError(f"{agent['name']}: two servers point at {m.group(1)}")
+            servers[new] = json.loads(json.dumps(conf))
+            renamed[name] = new
+            continue
         elif server.get("command") == "uvx" and spec.split("@")[0] == "mcp-neo4j-cypher":
             envs = set()
             for key in ("NEO4J_URI", "NEO4J_PASSWORD"):
@@ -226,6 +290,10 @@ def isolate_servers(agent: dict) -> None:
             server["env"] = env
         else:
             server.pop("env", None)
+        servers[name] = server
+    if "mcpServers" in agent:
+        agent["mcpServers"] = servers
+    return renamed
 
 
 def drop_ungranted_servers(agent: dict) -> list[str]:
@@ -259,6 +327,31 @@ def scope_resources(agent: dict, prompts: set[str]) -> None:
     if any(r.startswith(f"skill://{KIRO}/skills/{AGENT}/**") for r in out):
         out += [f"skill://{KIRO}/{path}" for path in SHARED_SKILLS.values() if f"skill://{KIRO}/{path}" not in out]
     agent["resources"] = out
+
+
+def add_codegraph(agent: dict) -> None:
+    """Mount archirelik's codegraph server, grant it, and index the repo at session start."""
+    conf = (json.loads(ARCHIRELIK_AGENT.read_text(encoding="utf-8")).get("mcpServers") or {}).get("codegraph")
+    if not conf or not os.access(ARCHIRELIK_ENSURE_CODEGRAPH, os.X_OK):
+        raise IsolationError("archirelik has no codegraph server: re-run the archirelik installer.")
+    agent.setdefault("mcpServers", {})["codegraph"] = json.loads(json.dumps(conf))
+    for field, grant in (("tools", "@codegraph"), ("allowedTools", "@codegraph/*")):
+        if grant not in agent.setdefault(field, []):
+            agent[field].append(grant)
+    if "permissions" in agent:
+        rules = agent["permissions"].setdefault("rules", [])
+        rule = next((r for r in rules if r.get("capability") == "mcp" and r.get("effect") == "allow"), None)
+        if rule is None:
+            rule = {"capability": "mcp", "match": [], "effect": "allow"}
+            rules.append(rule)
+        rule["match"] = sorted(set(rule.get("match") or []) | {"codegraph/*"})
+    if agent["name"] in ORCHESTRATORS:
+        hooks = agent.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            raise IsolationError(f"{agent['name']}: hooks are not in the V2 object form")
+        hooks["agentSpawn"] = [
+            h for h in hooks.get("agentSpawn") or [] if h.get("command") != str(ARCHIRELIK_ENSURE_CODEGRAPH)
+        ] + [{"command": str(ARCHIRELIK_ENSURE_CODEGRAPH), "timeout_ms": 20000}]
 
 
 def mcp_matches(agent: dict) -> set[str]:
@@ -337,28 +430,57 @@ def collect(env_keys: set[str], source_repos: str) -> dict[str, bytes]:
             if src.suffix == ".py":
                 text = inject_env_loader(text, env_keys)
             files[rel] = text.encode("utf-8")
+    for src in sorted(OVERLAY_RULES.glob("*.md")):
+        rel = f"agent-rules/{AGENT}/{src.name}"
+        if rel in files:
+            raise IsolationError(f"{rel}: upstream now ships a rule with this name")
+        files[rel] = src.read_bytes()
     prompts = set()
     for src in sorted((UPSTREAM / "prompts").glob("*.md")):
         rel = f"prompts/{src.name}"
         prompts.add(rel)
         files[rel] = rewrite_text(src.read_text(encoding="utf-8"), rel).encode("utf-8")
 
-    agents, texts = {}, {}
+    agents, texts, own = {}, {}, {}
+    pg = archirelik_db_servers()
     for src in sorted((UPSTREAM / "agents").glob("*.json")):
         agent = json.loads(rewrite_text(src.read_text(encoding="utf-8"), src.name))
         texts[agent["name"]] = context_text(json.loads(src.read_text(encoding="utf-8")))
-        isolate_servers(agent)
-        for name in drop_ungranted_servers(agent):
-            print(f"  ✓ {agent['name']}: dropped {name} (declared, never granted)")
+        own[agent["name"]] = isolate_servers(agent, pg)
+        agents[agent["name"]] = agent
+    # An agent without the server (backend-dev allowing its subagents' tools) takes every
+    # name it was renamed to: upstream calls two databases `searchkeyword-db`.
+    everywhere: dict[str, list[str]] = {}
+    for renamed in own.values():
+        for old, new in renamed.items():
+            everywhere.setdefault(old, [])
+            if new not in everywhere[old]:
+                everywhere[old].append(new)
+    reused = sorted({n for r in own.values() for n in r.values()})
+    print(f"  ✓ Postgres: {len(reused)} archirelik servers reused ({', '.join(reused)})")
+    for name, agent in agents.items():
+        rename_mcp_refs(agent, {**everywhere, **{o: [n] for o, n in own[name].items()}})
+        for dropped in drop_ungranted_servers(agent):
+            print(f"  ✓ {name}: dropped {dropped} (declared, never granted)")
+        if name in CODEGRAPH_AGENTS:
+            add_codegraph(agent)
         scope_resources(agent, prompts)
+        for rule, subagents in RULE_FOR_SUBAGENTS.items():
+            res = f"file://{KIRO}/agent-rules/{AGENT}/{rule}"
+            if name in subagents and res not in agent.setdefault("resources", []):
+                agent["resources"].append(res)
         if isinstance(agent.get("prompt"), str) and not agent["prompt"].startswith("file://"):
             agent["prompt"] += PROMPT_NOTE.format(source_repos=source_repos or "not set")
-        agents[agent["name"]] = agent
     for line in wire_subagents(agents, texts):
         print(f"  ✓ {line}")
     for name, agent in agents.items():
         verify_agent(agent)
         files[f"agents/{name}.json"] = (json.dumps(agent, indent=2, ensure_ascii=False) + "\n").encode()
+    if everywhere:
+        old_ref = re.compile(r"(?:@|mcp__)(?:" + "|".join(map(re.escape, sorted(everywhere, key=len, reverse=True)))
+                             + r")(?:/|__)")
+        if left := sorted(rel for rel, data in files.items() if old_ref.search(data.decode("utf-8", "ignore"))):
+            raise IsolationError("a replaced Postgres server is still named in: " + ", ".join(left))
     for src in sorted(BIN_TEMPLATES.glob("*.sh")):
         files[f"bin/{AGENT}/{src.name}"] = src.read_bytes()
     return files

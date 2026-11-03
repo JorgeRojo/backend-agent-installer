@@ -15,3 +15,5 @@ readonly UPSTREAM_LOCK="${SCRIPT_DIR}/upstream.lock"
 readonly MIN_PYTHON_VERSION="3.11.0"
 # Upstream agents ship already universal (V2 fields + permissions); validate needs a 2.35+ CLI.
 readonly MIN_KIRO_CLI_VERSION="2.35.1"
+# Same floor as agent-developer and archirelik (their install/versions.json).
+readonly MIN_RTK_VERSION="0.49.0"

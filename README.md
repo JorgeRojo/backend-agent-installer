@@ -8,7 +8,8 @@ Upstream is designed to *be* `~/.kiro`: you clone it there, and its `kiro` launc
 a temp dir, runs upstream's own `install.py` there, and then deploys the result:
 
 - Secrets go to `~/.kiro/bin/backend-dev/.env` (mode 600). No agent JSON holds a credential.
-- Postgres and Neo4j MCP servers start through `postgres-mcp.sh` and `neo4j-mcp.sh`, which source that file.
+- The local Postgres MCP servers are archirelik's `db_*`, so archirelik must be installed first. Neo4j starts
+  through `neo4j-mcp.sh`, which sources that file.
 - Skills, prompts and agents read the isolated file instead of `~/.kiro/.env`.
 - The agent stays in its own namespace, and every deployed path is recorded in `bin/backend-dev/.manifest`.
 
@@ -21,7 +22,7 @@ a temp dir, runs upstream's own `install.py` there, and then deploys the result:
 ./uninstall.sh
 ```
 
-Requires `kiro-cli` (run once), `python3` ≥ 3.11, `git`, `uv`, and SSH access to Bitbucket. The PRO/PRE
+Requires archirelik, `kiro-cli` (run once), `python3` ≥ 3.11, `git`, `uv`, and SSH access to Bitbucket. The PRO/PRE
 workflows also need the `redpoints` CLI, and the shared `kevint` skill needs the kevint CLI (without it the install
 warns and continues). The `localdb` skill needs `psycopg2` in your `python3`.
 
@@ -35,7 +36,7 @@ Run with `kiro-cli chat --agent backend-dev`, or `--agent backend-pre-verifier` 
 | Upstream | Installed |
 |---|---|
 | `~/.kiro/.env`, exported by the `kiro` launcher | `~/.kiro/bin/backend-dev/.env` (600); the launcher is never installed (`--skip-wrappers`) |
-| `uvx postgres-mcp` with `DATABASE_URI=${LOCAL_PG_*}` | `postgres-mcp.sh <db>`, which adds `application_name` and a 5-minute `idle_session_timeout` |
+| `uvx postgres-mcp` servers (`rpc-db`, `auth-db`…) with `DATABASE_URI=${LOCAL_PG_*}` | archirelik's server for the same database (`db_rpc`, `db_auth`…), renamed in tools, allows and permissions; a re-install replaces the old names |
 | `uvx mcp-neo4j-cypher` with `${NEO4J_<ENV>_*}` | `neo4j-mcp.sh <ENV>` |
 | Scripts reading `os.environ` (`query.py`, `schema_tool.py`, `fill_bamboo.py`) | A loader prepended that reads the isolated `.env` |
 | `skills/backend-dev/kevint/` (a team copy) | `~/.kiro/skills/kevint/`, installed or updated on every run by `kevint skill install -p ~/.kiro/skills` and shared with archirelik |
@@ -44,6 +45,8 @@ Run with `kiro-cli chat --agent backend-dev`, or `--agent backend-pre-verifier` 
 | `~/.kiro/skills/**` and `~/.kiro/steering/**` resource globs | Scoped to `backend-dev`, as absolute paths |
 | A server declared with no tool granted (`searchkeyword-core-db` in `db-searchkeyword`) | Removed: it would hold a Postgres connection nobody can use |
 | No `availableAgents` | Each spawning agent registers the subagents its context names, plus their MCP allows (V3 intersects a subagent's rules with its parent's) |
+| No code graph | archirelik's `codegraph` server (pinned `@colbymchenry/codegraph`, as in agent-developer) mounted on `backend-dev`, `backend-pre-verifier` and both code reviewers. The orchestrators index the session's repo at start with archirelik's `ensure-codegraph.sh`; usage rules in `overlay/agent-rules/backend-dev/codegraph.md` |
+| No rtk | `rtk` checked (and offered for install) as a prerequisite; `overlay/agent-rules/backend-dev/shell-rtk.md` tells every shell-using agent to prefix commands. In Claude Code the `PreToolUse` hook kiro-sync registers rewrites them; kiro-cli discards a hook's stdout, so no kiro hook is installed |
 | Agent prompts | A short block saying where the variables live and how to use them in a shell command |
 
 The isolation layer stops in any of these cases:
