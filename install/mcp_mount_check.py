@@ -12,6 +12,7 @@ Exit status is 1 when any server fails to hand shake or returns no tools.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import queue
@@ -56,7 +57,8 @@ def parse_claude_agent(path: Path) -> tuple[set[str] | None, list[dict]]:
 def parse_kiro_agent(path: Path) -> tuple[set[str] | None, list[dict]]:
     """Same contract as parse_claude_agent, for a kiro agent JSON.
 
-    kiro grants MCP tools as `@<server>/<tool>` entries in allowedTools.
+    kiro grants MCP tools as `@<server>/<tool>` entries in allowedTools; `<server>` may be a
+    glob (`@*-db/execute_sql`), so the names returned here are patterns.
     """
     cfg = json.loads(path.read_text(encoding="utf-8"))
     granted = None if "*" in (cfg.get("tools") or []) else {
@@ -182,12 +184,15 @@ def probe(server: dict, timeout: float) -> dict:
     return done(status, count, f"{srv.get('name', '?')} {srv.get('version', '?')}")
 
 
-def check_agent(path: Path, kind: str, timeout: float, jobs: int) -> int:
+def check_agent(path: Path, kind: str, timeout: float, jobs: int, skip: tuple[str, ...] = ()) -> int:
     granted, servers = (parse_kiro_agent if kind == "kiro" else parse_claude_agent)(path)
     enabled = [s for s in servers if not s.get("disabled")]
     skipped = [s["name"] for s in servers if s.get("disabled")]
 
     print(f"\n{path.name}  ({len(enabled)} enabled server(s), {len(skipped)} disabled)")
+    for s in [s for s in enabled if any(fnmatch.fnmatchcase(s["name"], g) for g in skip)]:
+        print(f"  SKIP  {s['name']:<28} not probed (--skip)")
+        enabled.remove(s)
 
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         results = list(pool.map(lambda s: probe(s, timeout), enabled))
@@ -202,11 +207,13 @@ def check_agent(path: Path, kind: str, timeout: float, jobs: int) -> int:
 
     if granted is not None:
         declared = {s["name"] for s in servers}
-        for name in sorted(granted - declared):
+        covered = {d for d in declared if any(fnmatch.fnmatchcase(d, g) for g in granted)}
+        dangling = {g for g in granted if not any(fnmatch.fnmatchcase(d, g) for d in declared)}
+        for name in sorted(dangling):
             failures += 1
             print(f"  FAIL  {name:<28} GRANTED_NOT_DECLARED: the tool grant names it "
                   f"but no server declares it")
-        for name in sorted(declared - granted):
+        for name in sorted(declared - covered):
             print(f"  WARN  {name:<28} DECLARED_NOT_GRANTED: no tool grant references it")
 
     return failures
@@ -218,6 +225,8 @@ def main() -> int:
     ap.add_argument("--source", choices=("claude", "kiro"), default="claude")
     ap.add_argument("--timeout", type=float, default=90.0, help="seconds per server")
     ap.add_argument("--jobs", type=int, default=4, help="concurrent probes")
+    ap.add_argument("--skip", action="append", default=[], metavar="GLOB",
+                    help="server names not to probe (repeatable)")
     args = ap.parse_args()
 
     root, suffix = (KIRO_AGENTS, ".json") if args.source == "kiro" else (CLAUDE_AGENTS, ".md")
@@ -237,7 +246,7 @@ def main() -> int:
     total = 0
     for p in paths:
         try:
-            total += check_agent(p, args.source, args.timeout, args.jobs)
+            total += check_agent(p, args.source, args.timeout, args.jobs, tuple(args.skip))
         except Exception as exc:  # a malformed definition is itself a failure
             total += 1
             print(f"\n{p.name}\n  FAIL  <parse>                     {type(exc).__name__}: {exc}")

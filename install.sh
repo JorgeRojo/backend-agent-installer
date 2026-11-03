@@ -35,7 +35,7 @@ unset _arg
 readonly ACCEPT_UPSTREAM SKIP_CLIENTS
 
 # shellcheck source=/dev/null
-for _lib in ui helpers config prerequisites sync_upstream check_compat run_upstream sync_clients; do
+for _lib in ui helpers config prerequisites sync_upstream check_compat run_upstream kevint_skill sync_clients; do
   source "${LIB_DIR}/${_lib}.sh"
 done
 unset _lib
@@ -70,11 +70,12 @@ verify_mcp_mounts() {
   local agents
   agents="$(sed -n 's#^agents/\(.*\)\.json$#\1#p' "${BIN_DIR}/.manifest" \
     | while read -r a; do grep -q '"mcpServers"' "${KIRO_DIR}/agents/${a}.json" && echo "$a"; done)"
+  # PRE/PRO servers need the VPN and a remote environment; local ones are what an install can prove.
   # shellcheck disable=SC2086  # one agent name per word
-  if python3 "${LIB_DIR}/mcp_mount_check.py" --source kiro $agents; then
-    green "  ✓ every declared MCP server handed shake and listed tools"
+  if python3 "${LIB_DIR}/mcp_mount_check.py" --source kiro --skip '*-pre' --skip '*-pro' $agents; then
+    green "  ✓ every local MCP server handed shake and listed tools"
   else
-    yellow "  ⚠ some servers did not start. Local Postgres and Neo4j must be running, PRE/PRO need the VPN."
+    yellow "  ⚠ some local servers did not start: are Postgres and Neo4j running in kevint?"
   fi
 }
 
@@ -88,6 +89,7 @@ main() {
   run_upstream_installer
 
   step "Step 5: Isolating the environment"
+  install_kevint_skill
   export UPSTREAM_DIR KIRO_DIR
   python3 "${SCRIPT_DIR}/isolate/isolate.py" || die "the isolation layer failed."
   # Upstream ships the agents already universal; a launch-time upgrade would rewrite them.

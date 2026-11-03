@@ -11,6 +11,7 @@ that is the layout kiro-sync (Claude) and kiro-to-agy (agy) inline as rules.
 """
 from __future__ import annotations
 
+import fnmatch
 import getpass
 import json
 import os
@@ -30,6 +31,13 @@ BIN_TEMPLATES = PROJECT_DIR / "bin-templates" / AGENT
 
 # Upstream tree -> ~/.kiro tree.
 CONTENT_DIRS = {f"skills/{AGENT}": f"skills/{AGENT}", f"steering/{AGENT}": f"agent-rules/{AGENT}"}
+# Upstream ships its own copy of these; the one installed by the kevint CLI, shared with
+# archirelik, replaces it. Value: the path under ~/.kiro that the CLI owns.
+SHARED_SKILLS = {"kevint": "skills/kevint/SKILL.md"}
+# Upstream content this installer never deploys, with the .env keys only it uses.
+EXCLUDED_SKILLS = ("bamboohr",)
+EXCLUDED_ENV_KEYS = ("BAMBOO_EMAIL", "BAMBOO_PASSWORD", "BAMBOO_TOTP_SECRET")
+EXCLUDED_ENV_COMMENT_RE = re.compile(r"BambooHR|BAMBOO_TOTP_SECRET")
 # Agents a user launches; every other upstream agent is a subagent.
 ORCHESTRATORS = (AGENT, "backend-pre-verifier")
 
@@ -44,6 +52,7 @@ TEXT_FIXES = (
     # The upstream `kiro` launcher is not installed.
     ("`kiro --agent ", "`kiro-cli chat --agent "),
     (f".kiro/steering/{AGENT}", f".kiro/agent-rules/{AGENT}"),
+    *((f"skills/{AGENT}/{name}/SKILL.md", path) for name, path in SHARED_SKILLS.items()),
 )
 
 PLACEHOLDER_RE = re.compile(r"(^|[-_@])your[-_]|^team-|^you@")
@@ -123,8 +132,11 @@ def quote(value: str) -> str:
 
 def build_env() -> tuple[dict[str, str], list[str]]:
     """Render ~/.kiro/bin/backend-dev/.env from upstream .env.example plus the previous values."""
-    template = parse_env(UPSTREAM / ".env.example")
-    previous = read_values(ENV_FILE)
+    template = [
+        (k, v, c) for k, v, c in parse_env(UPSTREAM / ".env.example")
+        if k not in EXCLUDED_ENV_KEYS and not (k is None and EXCLUDED_ENV_COMMENT_RE.search(v))
+    ]
+    previous = {k: v for k, v in read_values(ENV_FILE).items() if k not in EXCLUDED_ENV_KEYS}
     values: dict[str, str] = {}
     lines: list[str] = []
     asked = False
@@ -216,18 +228,36 @@ def isolate_servers(agent: dict) -> None:
             server.pop("env", None)
 
 
+def drop_ungranted_servers(agent: dict) -> list[str]:
+    """Remove servers no `tools`/`allowedTools` entry covers: they start, hold a connection, and
+    the agent can never call them."""
+    grants = [t[1:].split("/", 1)[0] for t in (agent.get("tools") or []) + (agent.get("allowedTools") or [])
+              if t.startswith("@") and t != "@builtin"]
+    if "*" in (agent.get("tools") or []):
+        return []
+    servers = agent.get("mcpServers") or {}
+    dropped = [n for n in servers if not any(fnmatch.fnmatchcase(n, g) for g in grants)]
+    for name in dropped:
+        del servers[name]
+    return dropped
+
+
 def scope_resources(agent: dict, prompts: set[str]) -> None:
     out = []
+    shared = set(SHARED_SKILLS.values())
     for res in agent.get("resources") or []:
         res = re.sub(r"^((?:skill|file)://~/\.kiro/(?:skills|steering))/\*\*", rf"\1/{AGENT}/**", res)
         res = res.replace(f"~/.kiro/steering/{AGENT}/", f"~/.kiro/agent-rules/{AGENT}/")
         m = re.match(r"^(skill|file)://~/\.kiro/(.*)$", res)
         if m:
             rel = m.group(2)
-            if not (rel.startswith(tuple(f"{d}/" for d in CONTENT_DIRS.values())) or rel in prompts):
+            if not (rel.startswith(tuple(f"{d}/" for d in CONTENT_DIRS.values())) or rel in prompts | shared):
                 raise IsolationError(f"{agent['name']}: resource outside the backend-dev namespace: {res}")
             res = f"{m.group(1)}://{KIRO}/{rel}"
         out.append(res)
+    # The skills/backend-dev/** glob used to reach upstream's copy of each shared skill.
+    if any(r.startswith(f"skill://{KIRO}/skills/{AGENT}/**") for r in out):
+        out += [f"skill://{KIRO}/{path}" for path in SHARED_SKILLS.values() if f"skill://{KIRO}/{path}" not in out]
     agent["resources"] = out
 
 
@@ -294,6 +324,8 @@ def collect(env_keys: set[str], source_repos: str) -> dict[str, bytes]:
         for src in sorted((UPSTREAM / top).rglob("*")):
             if not src.is_file() or "__pycache__" in src.parts:
                 continue
+            if top == f"skills/{AGENT}" and src.relative_to(UPSTREAM / top).parts[0] in (*SHARED_SKILLS, *EXCLUDED_SKILLS):
+                continue
             rel = f"{target}/{src.relative_to(UPSTREAM / top)}"
             data = src.read_bytes()
             try:
@@ -316,6 +348,8 @@ def collect(env_keys: set[str], source_repos: str) -> dict[str, bytes]:
         agent = json.loads(rewrite_text(src.read_text(encoding="utf-8"), src.name))
         texts[agent["name"]] = context_text(json.loads(src.read_text(encoding="utf-8")))
         isolate_servers(agent)
+        for name in drop_ungranted_servers(agent):
+            print(f"  ✓ {agent['name']}: dropped {name} (declared, never granted)")
         scope_resources(agent, prompts)
         if isinstance(agent.get("prompt"), str) and not agent["prompt"].startswith("file://"):
             agent["prompt"] += PROMPT_NOTE.format(source_repos=source_repos or "not set")
@@ -345,6 +379,9 @@ def deploy(files: dict[str, bytes]) -> tuple[int, int]:
     stale = sorted(previous - set(files))
     for rel in stale:
         (KIRO / rel).unlink(missing_ok=True)
+    # An excluded skill may also hold runtime files (browser profile, venv) the manifest never saw.
+    for name in EXCLUDED_SKILLS:
+        shutil.rmtree(KIRO / "skills" / AGENT / name, ignore_errors=True)
     MANIFEST.write_text("\n".join(sorted(files)) + "\n")
     return len(files), len(stale)
 

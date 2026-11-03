@@ -29,6 +29,7 @@ main() {
   dim "  Run ~/.claude/bin/kiro-sync.py --apply and ~/.gemini/bin/kiro-to-agy.py --apply after"
   dim "  removing backend-dev and backend-pre-verifier from their ORCHESTRATORS."
   dim "  uv tools are kept: uv tool uninstall postgres-mcp mcp-neo4j-cypher"
+  dim "  ~/.kiro/skills/kevint is kept (shared with archirelik): kevint skill uninstall --path ~/.kiro/skills --yes"
 }
 
 main "$@"

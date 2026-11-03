@@ -22,8 +22,8 @@ a temp dir, runs upstream's own `install.py` there, and then deploys the result:
 ```
 
 Requires `kiro-cli` (run once), `python3` ≥ 3.11, `git`, `uv`, and SSH access to Bitbucket. The PRO/PRE
-workflows also need the `redpoints` CLI. The `localdb` skill needs `psycopg2` in your `python3`, and
-`bamboohr` needs `playwright` + `pyotp` (see the skill).
+workflows also need the `redpoints` CLI, and the shared `kevint` skill needs the kevint CLI (without it the install
+warns and continues). The `localdb` skill needs `psycopg2` in your `python3`.
 
 Re-running is safe. Values already in the `.env` are kept, and only empty or placeholder values are
 asked for. If you leave a value empty, the install continues and lists it at the end.
@@ -38,8 +38,11 @@ Run with `kiro-cli chat --agent backend-dev`, or `--agent backend-pre-verifier` 
 | `uvx postgres-mcp` with `DATABASE_URI=${LOCAL_PG_*}` | `postgres-mcp.sh <db>`, which adds `application_name` and a 5-minute `idle_session_timeout` |
 | `uvx mcp-neo4j-cypher` with `${NEO4J_<ENV>_*}` | `neo4j-mcp.sh <ENV>` |
 | Scripts reading `os.environ` (`query.py`, `schema_tool.py`, `fill_bamboo.py`) | A loader prepended that reads the isolated `.env` |
+| `skills/backend-dev/kevint/` (a team copy) | `~/.kiro/skills/kevint/`, installed or updated on every run by `kevint skill install -p ~/.kiro/skills` and shared with archirelik |
+| `skills/backend-dev/bamboohr/` and `BAMBOO_EMAIL` / `BAMBOO_PASSWORD` / `BAMBOO_TOTP_SECRET` | Not installed, and removed from a previous install and from the `.env` |
 | `steering/backend-dev/` | `agent-rules/backend-dev/`: the layout the Claude and agy renderers inline as rules |
 | `~/.kiro/skills/**` and `~/.kiro/steering/**` resource globs | Scoped to `backend-dev`, as absolute paths |
+| A server declared with no tool granted (`searchkeyword-core-db` in `db-searchkeyword`) | Removed: it would hold a Postgres connection nobody can use |
 | No `availableAgents` | Each spawning agent registers the subagents its context names, plus their MCP allows (V3 intersects a subagent's rules with its parent's) |
 | Agent prompts | A short block saying where the variables live and how to use them in a shell command |
 
