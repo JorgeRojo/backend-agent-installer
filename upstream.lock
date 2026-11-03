@@ -1,0 +1,16 @@
+{
+  "_comment": [
+    "Upstream state this installer was validated against; install/check_compat.sh compares a fresh clone with it.",
+    "A new `commit` is just new content. A changed hash under `contract` means upstream install.py changed:",
+    "re-check run_upstream.sh against it, then re-pin with ./install.sh --accept-upstream."
+  ],
+  "repo": "ssh://git@bitbucket.rdpnts.com:7999/aiagents/backend-agent.git",
+  "branch": "master",
+  "commit": "d59dd49db146986ca096b2826dea3197bfa083c5",
+  "commit_date": "2026-11-03T17:39:11+01:00",
+  "commit_subject": "RELEASE Fix Git skill - never let a new branch track its base branch",
+  "validated_at": "2026-11-03",
+  "contract": {
+    "install.py": "3f8e629753d0e833"
+  }
+}

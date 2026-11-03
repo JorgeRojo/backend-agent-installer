@@ -1,0 +1,70 @@
+# backend-agent-installer
+
+Installs the team [backend-agent][upstream] (`backend-dev` and its subagents) into an existing
+`~/.kiro` with an isolated environment, next to any other agent you already have.
+
+Upstream is designed to *be* `~/.kiro`: you clone it there, and its `kiro` launcher exports
+`~/.kiro/.env` into every session. This installer leaves `~/.kiro` alone. It clones upstream into
+a temp dir, runs upstream's own `install.py` there, and then deploys the result:
+
+- Secrets go to `~/.kiro/bin/backend-dev/.env` (mode 600). No agent JSON holds a credential.
+- Postgres and Neo4j MCP servers start through `postgres-mcp.sh` and `neo4j-mcp.sh`, which source that file.
+- Skills, prompts and agents read the isolated file instead of `~/.kiro/.env`.
+- The agent stays in its own namespace, and every deployed path is recorded in `bin/backend-dev/.manifest`.
+
+## Install
+
+```bash
+./install.sh                    # install or re-install
+./install.sh --accept-upstream  # only after checking an upstream install.py change
+./install.sh --no-sync          # skip the Claude Code / Antigravity render
+./uninstall.sh
+```
+
+Requires `kiro-cli` (run once), `python3` ≥ 3.11, `git`, `uv`, and SSH access to Bitbucket. The PRO/PRE
+workflows also need the `redpoints` CLI. The `localdb` skill needs `psycopg2` in your `python3`, and
+`bamboohr` needs `playwright` + `pyotp` (see the skill).
+
+Re-running is safe. Values already in the `.env` are kept, and only empty or placeholder values are
+asked for. If you leave a value empty, the install continues and lists it at the end.
+
+Run with `kiro-cli chat --agent backend-dev`, or `--agent backend-pre-verifier` to verify a ticket in PRE.
+
+## What the isolation layer changes
+
+| Upstream | Installed |
+|---|---|
+| `~/.kiro/.env`, exported by the `kiro` launcher | `~/.kiro/bin/backend-dev/.env` (600); the launcher is never installed (`--skip-wrappers`) |
+| `uvx postgres-mcp` with `DATABASE_URI=${LOCAL_PG_*}` | `postgres-mcp.sh <db>`, which adds `application_name` and a 5-minute `idle_session_timeout` |
+| `uvx mcp-neo4j-cypher` with `${NEO4J_<ENV>_*}` | `neo4j-mcp.sh <ENV>` |
+| Scripts reading `os.environ` (`query.py`, `schema_tool.py`, `fill_bamboo.py`) | A loader prepended that reads the isolated `.env` |
+| `steering/backend-dev/` | `agent-rules/backend-dev/`: the layout the Claude and agy renderers inline as rules |
+| `~/.kiro/skills/**` and `~/.kiro/steering/**` resource globs | Scoped to `backend-dev`, as absolute paths |
+| No `availableAgents` | Each spawning agent registers the subagents its context names, plus their MCP allows (V3 intersects a subagent's rules with its parent's) |
+| Agent prompts | A short block saying where the variables live and how to use them in a shell command |
+
+The isolation layer stops in any of these cases:
+
+- an MCP server has a shape it does not know;
+- a `${VAR}` or an inline secret is left in an agent JSON;
+- a reference to `~/.kiro/.env` is left anywhere;
+- a target path exists but this installer did not create it.
+
+## Claude Code and Antigravity
+
+Step 7 renders `backend-dev` and `backend-pre-verifier` with your own `~/.claude/bin/kiro-sync.py`
+and `~/.gemini/bin/kiro-to-agy.py`. Both must list them in `ORCHESTRATORS`. If a renderer is missing,
+the step skips it.
+
+On first install the agy plugins are created disabled, because enabled plugins share one rule set.
+Turn one on with `agy plugin enable backend-dev`. In Claude Code, run the agent with
+`~/.claude/bin/backend-dev`.
+
+## Upstream changes
+
+`upstream.lock` pins the validated commit and a fingerprint of upstream `install.py`. A new commit
+is just new content. A changed `install.py` stops the install: check that `--skip-wrappers` still
+exists and that the script still writes nothing outside the clone except `uv tool install`, then
+re-run with `--accept-upstream` and commit the updated lock.
+
+[upstream]: https://bitbucket.rdpnts.com/projects/AIAGENTS/repos/backend-agent
