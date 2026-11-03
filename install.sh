@@ -5,23 +5,26 @@ set -euo pipefail
 # environment, without making ~/.kiro a clone of it. Steps:
 #   1 prerequisites · 2 clone backend-agent@master into a temp dir · 3 compatibility check
 #   4 upstream install.py inside the clone · 5 isolation layer · 6 validation
-#   7 Claude Code / Antigravity sync · 8 MCP mount check
+#   7 Claude Code / Antigravity sync · 8 MCP mount check · 9 Java toolchain + jdtls · dev-tools check
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LIB_DIR="${SCRIPT_DIR}/install"
 
 ACCEPT_UPSTREAM=false
 SKIP_CLIENTS=false
+CHECK_ONLY=false
 for _arg in "$@"; do
   case "$_arg" in
     --accept-upstream) ACCEPT_UPSTREAM=true ;;
     --no-sync) SKIP_CLIENTS=true ;;
+    --check) CHECK_ONLY=true ;;
     -h|--help)
       cat <<'EOF'
-Usage: install.sh [--accept-upstream] [--no-sync]
+Usage: install.sh [--accept-upstream] [--no-sync] [--check]
 
   --accept-upstream   Proceed when upstream install.py changed, then re-pin upstream.lock.
   --no-sync           Do not render the agents into Claude Code and Antigravity.
+  --check             Only check the development tools the agents use; installs nothing.
 
 Values already in ~/.kiro/bin/backend-dev/.env are kept; only empty or placeholder
 values are asked for.
@@ -32,10 +35,10 @@ EOF
   esac
 done
 unset _arg
-readonly ACCEPT_UPSTREAM SKIP_CLIENTS
+readonly ACCEPT_UPSTREAM SKIP_CLIENTS CHECK_ONLY
 
 # shellcheck source=/dev/null
-for _lib in ui helpers config prerequisites sync_upstream check_compat run_upstream kevint_skill sync_clients; do
+for _lib in ui helpers config prerequisites sync_upstream check_compat run_upstream kevint_skill sync_clients toolchain; do
   source "${LIB_DIR}/${_lib}.sh"
 done
 unset _lib
@@ -81,6 +84,10 @@ verify_mcp_mounts() {
 
 main() {
   bold "backend-agent-installer"
+  if [[ "$CHECK_ONLY" == true ]]; then
+    check_dev_tools
+    exit $?
+  fi
   [[ -d "$KIRO_DIR" ]] || die "${KIRO_DIR} not found — install kiro-cli and run it once first."
 
   check_prerequisites
@@ -105,6 +112,8 @@ main() {
     sync_clients
   fi
   verify_mcp_mounts
+  install_toolchain
+  check_dev_tools || true
 
   step "Installation complete"
   green "  ✓ Secrets: ${BIN_DIR}/.env (600) — no agent JSON holds one"

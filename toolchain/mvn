@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# mvn — sdkman's Maven on JDK 17 for shells that never source sdkman-init.sh (agents, LSP, scripts).
+# Rendered by install/toolchain.sh. JAVA_HOME is forced: the repos build with 17 whatever the caller has.
+export JAVA_HOME="@JDK17@"
+exec "@MAVEN_HOME@/bin/mvn" "$@"

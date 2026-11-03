@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""jdtls — Eclipse JDT LS for kiro-cli and Claude Code, rendered by install/toolchain.sh.
+
+Runs the server on its own JDK and registers the JDK the repos build with: neither host's
+config can pass java.configuration.runtimes (Claude's official jdtls-lsp plugin sends no
+settings), so they are injected into initialize and workspace/didChangeConfiguration.
+Without them the project compiles against the server's JDK.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+JDTLS_HOME = Path("@JDTLS_HOME@")
+RUNTIME_JDK = Path("@JDK_RUNTIME@")
+LOMBOK_JAR = "@LOMBOK_JAR@"
+RUNTIMES = [{"name": "JavaSE-17", "path": "@JDK17@", "default": True}]
+CACHE = Path.home() / ".cache" / "jdtls"
+
+
+def inject(settings: dict) -> dict:
+    conf = settings.setdefault("java", {}).setdefault("configuration", {})
+    conf.setdefault("runtimes", RUNTIMES)
+    return settings
+
+
+def rewrite(body: bytes) -> bytes:
+    msg = json.loads(body)
+    method, params = msg.get("method"), msg.get("params")
+    if method == "initialize" and isinstance(params, dict):
+        opts = params.get("initializationOptions") or {}
+        opts["settings"] = inject(opts.get("settings") or {})
+        params["initializationOptions"] = opts
+    elif method == "workspace/didChangeConfiguration" and isinstance(params, dict):
+        params["settings"] = inject(params.get("settings") or {})
+    else:
+        return body
+    return json.dumps(msg, separators=(",", ":")).encode()
+
+
+def pump(src, dst) -> None:
+    while True:
+        length = None
+        while (line := src.readline()) not in (b"\r\n", b"\n"):
+            if not line:
+                return
+            name, _, value = line.decode("ascii").partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value)
+        if length is None:
+            return
+        body = rewrite(src.read(length))
+        dst.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        dst.flush()
+
+
+def workspace(root: Path):
+    # jdtls does not lock -data: two servers on one repo (kiro and Claude at once) would share an index.
+    base = CACHE / "workspaces" / f"{root.name}-{hashlib.sha1(str(root).encode()).hexdigest()[:12]}"
+    base.parent.mkdir(parents=True, exist_ok=True)
+    for slot in range(8):
+        data = base.with_name(f"{base.name}-{slot}") if slot else base
+        fh = open(f"{data}.lock", "w")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            continue
+        return data, fh
+    sys.exit("jdtls: every workspace slot for this repo is in use")
+
+
+def main() -> int:
+    data, _lock = workspace(Path.cwd().resolve())
+    launcher = next((JDTLS_HOME / "plugins").glob("org.eclipse.equinox.launcher_*.jar"))
+    cmd = [
+        str(RUNTIME_JDK / "bin" / "java"),
+        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+        "-Dosgi.bundles.defaultStartLevel=4",
+        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+        "-Dosgi.checkConfiguration=true",
+        f"-Dosgi.sharedConfiguration.area={JDTLS_HOME / 'config_linux'}",
+        "-Dosgi.sharedConfiguration.area.readOnly=true",
+        "-Dosgi.configuration.cascaded=true",
+        "-Djdk.xml.maxGeneralEntitySizeLimit=0",
+        "-Djdk.xml.totalEntitySizeLimit=0",
+        "-Dsun.zip.disableMemoryMapping=true",
+        "-XX:+UseParallelGC", "-XX:GCTimeRatio=4", "-XX:AdaptiveSizePolicyWeight=90",
+        "-Xms256m", "-Xmx2G",
+        f"-javaagent:{LOMBOK_JAR}",
+        "--add-modules=ALL-SYSTEM",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "-jar", str(launcher),
+        "-configuration", str(CACHE / "config"),
+        "-data", str(data),
+        *sys.argv[1:],
+    ]
+    env = {**os.environ, "JAVA_HOME": str(RUNTIME_JDK)}
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, env=env)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, lambda s, _f: proc.send_signal(s))
+    try:
+        pump(sys.stdin.buffer, proc.stdin)
+    except BrokenPipeError:
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    return proc.wait()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

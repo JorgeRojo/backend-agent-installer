@@ -19,6 +19,7 @@ a temp dir, runs upstream's own `install.py` there, and then deploys the result:
 ./install.sh                    # install or re-install
 ./install.sh --accept-upstream  # only after checking an upstream install.py change
 ./install.sh --no-sync          # skip the Claude Code / Antigravity render
+./install.sh --check            # only check the development tools; installs nothing
 ./uninstall.sh
 ```
 
@@ -48,6 +49,7 @@ Run with `kiro-cli chat --agent backend-dev`, or `--agent backend-pre-verifier` 
 | No code graph | archirelik's `codegraph` server (pinned `@colbymchenry/codegraph`, as in agent-developer) mounted on `backend-dev`, `backend-pre-verifier` and both code reviewers. The orchestrators index the session's repo at start with archirelik's `ensure-codegraph.sh`; usage rules in `overlay/agent-rules/backend-dev/codegraph.md` |
 | No rtk | `rtk` checked (and offered for install) as a prerequisite; `overlay/agent-rules/backend-dev/shell-rtk.md` tells every shell-using agent to prefix commands. In Claude Code the `PreToolUse` hook kiro-sync registers rewrites them; kiro-cli discards a hook's stdout, so no kiro hook is installed |
 | Agent prompts | A short block saying where the variables live and how to use them in a shell command |
+| `agent-rules/backend-dev/**/*.md` resource glob | Expanded to the always-on rules. Rules that apply to one kind of task (`SITUATIONAL_RULES` in `isolate.py`: infrastructure, review comments, rule-change PRs, WSL toolchain, Java toolchain, and the Python rules from the hefesto repos) are deployed but no resource loads them. `backend-dev_index.md`, loaded by every agent and subagent of the family, tells the agent which one to read for the task, as `general_index.md` does for agent-developer. The install stops if the index and the list disagree |
 
 The isolation layer stops in any of these cases:
 
@@ -55,6 +57,27 @@ The isolation layer stops in any of these cases:
 - a `${VAR}` or an inline secret is left in an agent JSON;
 - a reference to `~/.kiro/.env` is left anywhere;
 - a target path exists but this installer did not create it.
+
+## Java toolchain and language server
+
+Agent shells, MCP servers and language servers source no rc file, so sdkman's init in `~/.zshrc` never
+reaches them: they would get no `mvn` and the system OpenJDK 21-ea. Step 9 installs, without sudo:
+
+| What | Where |
+|---|---|
+| Temurin 17 (sdkman default), Maven 3.9.16, Temurin 25 (only runs jdtls) | `~/.sdkman/candidates/` |
+| `mvn`: sdkman's Maven with `JAVA_HOME` forced to 17 | `~/.local/bin/mvn` |
+| Eclipse JDT LS 1.63.0 (sha256-checked) and lombok 1.18.48 | `~/.local/share/jdtls/` |
+| `jdtls`: starts the server on 25 and registers 17 as the project JDK (`java.configuration.runtimes`) | `~/.local/bin/jdtls` |
+| Claude Code plugin `jdtls-lsp@claude-plugins-official`, user scope | `~/.claude/plugins/` |
+| `.factorypath` and `.kiro/settings/lsp.json` ignored in every repo | `~/.config/git/ignore` |
+
+kiro-cli ships a Java entry that runs `jdtls` from PATH and starts it on the first `code` request,
+so it needs no per-repo `/code init`. Index workspaces live in `~/.cache/jdtls/workspaces/`, one per
+repo, plus a slot per concurrent server. The `java-toolchain.md` rule tells the agents to use this
+`mvn` instead of downloading Maven to `/tmp`. `--check` runs the same verification as the end of an
+install: the toolchain from a shell without sdkman, the language server, and every command the
+skills call.
 
 ## Claude Code and Antigravity
 

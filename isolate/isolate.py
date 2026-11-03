@@ -71,14 +71,25 @@ ARCHIRELIK_PG_WRAPPER = KIRO / "bin" / "archirelik" / "postgres-mcp.sh"
 ARCHIRELIK_AGENT = KIRO / "agents" / "archirelik.json"
 ARCHIRELIK_ENSURE_CODEGRAPH = KIRO / "bin" / "archirelik" / "ensure-codegraph.sh"
 CODEGRAPH_AGENTS = (*ORCHESTRATORS, "code-reviewer", "code-reviewer-critical")
-# Installer-owned rules, deployed next to upstream's steering. The orchestrators load the whole
-# directory; a subagent gets a rule only through an explicit resource.
+# Installer-owned rules, deployed next to upstream's steering. An agent gets a rule only through
+# an explicit resource; the agent-rules glob is expanded to the always-on files.
 OVERLAY_RULES = PROJECT_DIR / "overlay" / "agent-rules" / AGENT
+RULES_GLOB = f"file://{KIRO}/agent-rules/{AGENT}/**/*.md"
 RULE_FOR_SUBAGENTS = {
     "codegraph.md": ("code-reviewer", "code-reviewer-critical"),
     "shell-rtk.md": ("atlassian", "build-verifier", "cache-ops", "code-reviewer",
                      "code-reviewer-critical", "logs-metrics"),
 }
+# Loaded by every agent of the family. It names the situational rules, which no resource loads.
+RULES_INDEX = f"{AGENT}_index.md"
+SITUATIONAL_RULES = (
+    "infrastructure-architecture.md", "applying-review-comments.md", "rule-change-pr-scope.md",
+    "local-toolchain-filesystem.md", "java-toolchain.md",
+    "python-style.md", "python-structure.md", "python-testing.md",
+)
+
+# Local model choices that win over upstream's.
+MODEL_OVERRIDES = {"code-reviewer": "claude-sonnet-5.5"}
 
 PROMPT_NOTE = """
 
@@ -435,6 +446,19 @@ def collect(env_keys: set[str], source_repos: str) -> dict[str, bytes]:
         if rel in files:
             raise IsolationError(f"{rel}: upstream now ships a rule with this name")
         files[rel] = src.read_bytes()
+    index = files.get(f"agent-rules/{AGENT}/{RULES_INDEX}", b"").decode("utf-8")
+    named = set(re.findall(r"`([a-z0-9-]+\.md)`", index))
+    for rule in SITUATIONAL_RULES:
+        if f"agent-rules/{AGENT}/{rule}" not in files:
+            raise IsolationError(f"SITUATIONAL_RULES: {rule} is not deployed")
+        if rule not in named:
+            raise IsolationError(f"{RULES_INDEX} does not name {rule}, so no agent would read it")
+    if stray := sorted(named - set(SITUATIONAL_RULES)):
+        raise IsolationError(f"{RULES_INDEX} names rules outside SITUATIONAL_RULES: {', '.join(stray)}")
+    always_rules = sorted(
+        f"file://{KIRO}/{rel}" for rel in files
+        if rel.startswith(f"agent-rules/{AGENT}/") and rel.endswith(".md") and rel.rsplit("/", 1)[1] not in SITUATIONAL_RULES
+    )
     prompts = set()
     for src in sorted((UPSTREAM / "prompts").glob("*.md")):
         rel = f"prompts/{src.name}"
@@ -465,6 +489,12 @@ def collect(env_keys: set[str], source_repos: str) -> dict[str, bytes]:
         if name in CODEGRAPH_AGENTS:
             add_codegraph(agent)
         scope_resources(agent, prompts)
+        if RULES_GLOB in agent.get("resources", []):
+            i = agent["resources"].index(RULES_GLOB)
+            agent["resources"][i:i + 1] = always_rules
+        index_res = f"file://{KIRO}/agent-rules/{AGENT}/{RULES_INDEX}"
+        if index_res not in agent.setdefault("resources", []):
+            agent["resources"].append(index_res)
         for rule, subagents in RULE_FOR_SUBAGENTS.items():
             res = f"file://{KIRO}/agent-rules/{AGENT}/{rule}"
             if name in subagents and res not in agent.setdefault("resources", []):
@@ -473,6 +503,12 @@ def collect(env_keys: set[str], source_repos: str) -> dict[str, bytes]:
             agent["prompt"] += PROMPT_NOTE.format(source_repos=source_repos or "not set")
     for line in wire_subagents(agents, texts):
         print(f"  ✓ {line}")
+    for name, model in MODEL_OVERRIDES.items():
+        if name not in agents:
+            raise IsolationError(f"MODEL_OVERRIDES: upstream no longer ships {name}")
+        if agents[name].get("model") != model:
+            print(f"  ✓ {name}: model {agents[name].get('model')} -> {model}")
+            agents[name]["model"] = model
     for name, agent in agents.items():
         verify_agent(agent)
         files[f"agents/{name}.json"] = (json.dumps(agent, indent=2, ensure_ascii=False) + "\n").encode()
